@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package train;
+
+option go_package = "/proto";
+
+service TrainTicketService {
+  rpc PurchaseTicket(PurchaseRequest) returns (PurchaseReply) {}
+  rpc ViewReceipt(AuthRequest) returns (ReceiptReply) {}
+  rpc ViewAllUsers(AuthRequest) returns (UserListReply) {}
+  rpc RemoveUserFromTrain(ModifyUserRequest) returns (ModifyUserReply) {}
+  rpc ModifyUserSeat(ModifyUserRequest) returns (ModifyUserReply) {}
+}
+
+message PurchaseRequest {
+  string from = 1;
+  string to = 2;
+  User user = 3;
+}
+
+message AuthRequest {
+  string token = 1;
+}
+
+message ModifyUserRequest {
+  string token = 1;
+  string userEmail = 2;
+  string newSection = 3;
+  int32 newSeat = 4;
+}
+
+message User {
+  string firstName = 1;
+  string lastName = 2;
+  string email = 3;
+}
+
+message PurchaseReply {
+  string receiptId = 1;
+}
+
+message ReceiptReply {
+  string details = 1;
+}
+
+message UserListReply {
+  string details = 1;
+}
+
+message ModifyUserReply {
+  bool success = 1;
+}

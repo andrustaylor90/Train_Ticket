@@ -17,3 +17,18 @@ I want to board a train from London to France. The train ticket will cost $20.
 4.	An API that lets you view the users and seat they are allocated by the requested section
 5.	An API to remove a user from the train
 6.	An API to modify a user’s seat
+
+## Test
+```
+go test .\server\
+```
+
+## Run Server
+```
+go run .\server\
+```
+
+## Run Client
+```
+go run .\client\
+```

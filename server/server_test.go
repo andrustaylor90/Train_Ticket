@@ -2,27 +2,25 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
-	"strings"
 	"testing"
-	"time"
-	"train_ticket_service/proto"
+
+	pb "train-ticket-app/pb/proto/proto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 )
 
+// Buffer size for the listener
 const bufSize = 1024 * 1024
 
 var lis *bufconn.Listener
-var client proto.TrainTicketServiceClient
 
 func init() {
 	lis = bufconn.Listen(bufSize)
 	s := grpc.NewServer()
-	proto.RegisterTrainTicketServiceServer(s, &server{})
+	pb.RegisterTrainServiceServer(s, newServer())
 
 	go func() {
 		if err := s.Serve(lis); err != nil {
@@ -35,122 +33,158 @@ func bufDialer(context.Context, string) (net.Conn, error) {
 	return lis.Dial()
 }
 
-func setupClient() {
+func TestPurchaseTicket(t *testing.T) {
 	ctx := context.Background()
 	conn, err := grpc.DialContext(ctx, "bufnet", grpc.WithContextDialer(bufDialer), grpc.WithInsecure())
 	if err != nil {
-		log.Fatalf("Failed to dial bufnet: %v", err)
+		t.Fatalf("Failed to dial bufnet: %v", err)
 	}
-	client = proto.NewTrainTicketServiceClient(conn)
-}
+	defer conn.Close()
+	client := pb.NewTrainServiceClient(conn)
 
-func TestPurchaseTicket(t *testing.T) {
-	setupClient()
-	req := &proto.PurchaseRequest{
-		From: "London",
-		To:   "Paris",
-		User: &proto.User{
-			FirstName: "John",
-			LastName:  "Doe",
-			Email:     "john.doe@example.com",
-		},
+	tests := []struct {
+		name    string
+		user    *pb.User
+		from    string
+		to      string
+		wantErr bool
+	}{
+		{"ValidPurchase", &pb.User{FirstName: "Andrus", LastName: "Taylor", Email: "andrustaylor90@gmail.com"}, "London", "France", false},
+		{"DuplicatePurchase", &pb.User{FirstName: "Andrus", LastName: "Taylor", Email: "andrustaylor90@gmail.com"}, "London", "France", true},
+		// More test cases as needed
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	res, err := client.PurchaseTicket(ctx, req)
-	if err != nil {
-		t.Fatalf("PurchaseTicket failed: %v", err)
-	}
-	if res.ReceiptId == "" {
-		t.Errorf("Expected a valid receipt ID, got empty")
-	}
-}
 
-func TestViewReceipt(t *testing.T) {
-	setupClient()
-	req := &proto.AuthRequest{
-		Token: "john.doe@example.com", // Assuming token directly contains the email
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	res, err := client.ViewReceipt(ctx, req)
-	if err != nil {
-		t.Fatalf("ViewReceipt failed: %v", err)
-	}
-	if res.Details == "" {
-		t.Errorf("Expected ticket details, got empty")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.PurchaseTicket(ctx, &pb.PurchaseRequest{User: tc.user, From: tc.from, To: tc.to})
+			if (err != nil) != tc.wantErr {
+				t.Errorf("PurchaseTicket(%v) got err: %v, wantErr %v", tc.user, err, tc.wantErr)
+			}
+		})
 	}
 }
 
-func TestViewAllUsers(t *testing.T) {
-	setupClient()
-	req := &proto.AuthRequest{
-		Token: "admin@example.com", // Assuming an 'admin' token that has the privilege to view all users
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	res, err := client.ViewAllUsers(ctx, req)
+func TestGetReceipt(t *testing.T) {
+	ctx := context.Background()
+	conn, err := grpc.DialContext(ctx, "bufnet", grpc.WithContextDialer(bufDialer), grpc.WithInsecure())
 	if err != nil {
-		t.Fatalf("ViewAllUsers failed: %v", err)
+		t.Fatalf("Failed to dial bufnet: %v", err)
 	}
-	if res.Details == "" {
-		t.Errorf("Expected non-empty user list, got empty")
+	defer conn.Close()
+	client := pb.NewTrainServiceClient(conn)
+
+	client.PurchaseTicket(ctx, &pb.PurchaseRequest{User: &pb.User{FirstName: "Alice", LastName: "Smith", Email: "alice@gmail.com"}, From: "London", To: "France"})
+
+	tests := []struct {
+		name    string
+		email   string
+		wantErr bool
+	}{
+		{"ValidRequest", "alice@gmail.com", false},
+		{"InvalidRequest", "bob@gmail.com", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.GetReceipt(ctx, &pb.UserRequest{Email: tc.email})
+
+			if (err != nil) != tc.wantErr {
+				t.Errorf("GetReceipt(%v) got err: %v, wantErr %v", tc.email, err, tc.wantErr)
+			}
+		})
 	}
 }
 
-func TestRemoveUserFromTrain(t *testing.T) {
-	setupClient()
-	userEmail := "john.doe@example.com" // Assuming this user exists and has a ticket
-	req := &proto.ModifyUserRequest{
-		Token:     "admin@example.com", // Admin token, assuming admin rights are needed to remove a user
-		UserEmail: userEmail,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	res, err := client.RemoveUserFromTrain(ctx, req)
+func TestViewSeats(t *testing.T) {
+	ctx := context.Background()
+	conn, err := grpc.DialContext(ctx, "bufnet", grpc.WithContextDialer(bufDialer), grpc.WithInsecure())
 	if err != nil {
-		t.Fatalf("RemoveUserFromTrain failed: %v", err)
+		t.Fatalf("Failed to dial bufnet: %v", err)
 	}
-	if !res.Success {
-		t.Errorf("Expected successful removal, got failure")
+	defer conn.Close()
+	client := pb.NewTrainServiceClient(conn)
+
+	// Pre-populate with some data
+	client.PurchaseTicket(ctx, &pb.PurchaseRequest{User: &pb.User{FirstName: "Alice", LastName: "Smith", Email: "alice@gmail.com"}, From: "London", To: "France"})
+
+	tests := []struct {
+		name    string
+		section string
+		wantErr bool
+	}{
+		{"ViewSectionA", "A", false},
+		{"ViewSectionB", "B", false},
+		{"InvalidSection", "C", true},
 	}
 
-	// Optionally, try to view the receipt to confirm removal
-	viewReq := &proto.AuthRequest{Token: userEmail}
-	_, err = client.ViewReceipt(ctx, viewReq)
-	if err == nil {
-		t.Errorf("Expected error when viewing receipt for removed user, got none")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.ViewSeats(ctx, &pb.SectionRequest{Section: tc.section})
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ViewSeats(%v) got err: %v, wantErr %v", tc.section, err, tc.wantErr)
+			}
+		})
 	}
 }
 
-func TestModifyUserSeat(t *testing.T) {
-	setupClient()
-	userEmail := "jane.doe@example.com" // Assuming this user exists
-	newSection := "B"
-	newSeat := int32(1)
-	req := &proto.ModifyUserRequest{
-		Token:      "admin@example.com", // Admin or user token, assuming they have the rights to modify seats
-		UserEmail:  userEmail,
-		NewSection: newSection,
-		NewSeat:    newSeat,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	res, err := client.ModifyUserSeat(ctx, req)
+func TestRemoveUser(t *testing.T) {
+	ctx := context.Background()
+	conn, err := grpc.DialContext(ctx, "bufnet", grpc.WithContextDialer(bufDialer), grpc.WithInsecure())
 	if err != nil {
-		t.Fatalf("ModifyUserSeat failed: %v", err)
+		t.Fatalf("Failed to dial bufnet: %v", err)
 	}
-	if !res.Success {
-		t.Errorf("Expected successful seat modification, got failure")
+	defer conn.Close()
+	client := pb.NewTrainServiceClient(conn)
+
+	client.PurchaseTicket(ctx, &pb.PurchaseRequest{User: &pb.User{FirstName: "Bob", LastName: "Johnson", Email: "bob@gmail.com"}, From: "London", To: "France"})
+
+	tests := []struct {
+		name    string
+		email   string
+		wantErr bool
+	}{
+		{"ValidRemoval", "bob@gmail.com", false},
+		{"InvalidRemoval", "charlie@gmail.com", true},
 	}
 
-	viewReq := &proto.AuthRequest{Token: userEmail}
-	viewRes, err := client.ViewReceipt(ctx, viewReq)
-	if err != nil {
-		t.Fatalf("Error when viewing receipt after modification: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.RemoveUser(ctx, &pb.UserRequest{Email: tc.email})
+			if (err != nil) != tc.wantErr {
+				t.Errorf("RemoveUser(%v) got err: %v, wantErr %v", tc.email, err, tc.wantErr)
+			}
+		})
 	}
-	expectedSeat := fmt.Sprintf("%s-%d", newSection, newSeat)
-	if !strings.Contains(viewRes.Details, expectedSeat) {
-		t.Errorf("Expected new seat '%s', but got: %s", expectedSeat, viewRes.Details)
+}
+
+func TestModifySeat(t *testing.T) {
+	ctx := context.Background()
+	conn, err := grpc.DialContext(ctx, "bufnet", grpc.WithContextDialer(bufDialer), grpc.WithInsecure())
+	if err != nil {
+		t.Fatalf("Failed to dial bufnet: %v", err)
+	}
+	defer conn.Close()
+	client := pb.NewTrainServiceClient(conn)
+
+	client.PurchaseTicket(ctx, &pb.PurchaseRequest{User: &pb.User{FirstName: "Eve", LastName: "Williams", Email: "eve@gmail.com"}, From: "London", To: "France"})
+
+	tests := []struct {
+		name    string
+		email   string
+		newSeat string
+		wantErr bool
+	}{
+		{"ValidSeatChange", "eve@gmail.com", "B2", false},
+		{"InvalidSeatChange", "eve@gmail.com", "B5", true},
+		{"NonExistentUser", "unknown@gmail.com", "A1", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.ModifySeat(ctx, &pb.ModifySeatRequest{Email: tc.email, NewSeat: tc.newSeat})
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ModifySeat(%v, %v) got err: %v, wantErr %v", tc.email, tc.newSeat, err, tc.wantErr)
+			}
+		})
 	}
 }

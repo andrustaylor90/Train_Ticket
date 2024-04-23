@@ -5,147 +5,195 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
-	"train_ticket_service/proto"
+	pb "train-ticket-app/pb/proto/proto"
 
-	"github.com/golang-jwt/jwt/v4"
 	"google.golang.org/grpc"
 )
 
-var mu sync.Mutex         // Protects tickets
-var tickets sync.Map      // A simple map to store user email to ticket mapping
-var seatCounter int32 = 0 // Atomic counter for seat assignments
+// Example seat numbers
+var seats_SectionA = []string{"A1", "A2", "A3", "A4"}
+var seats_SectionB = []string{"B1", "B2", "B3", "B4"}
 
-func authInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-	token, err := authenticate(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, fmt.Errorf("could not parse claims")
-	}
-
-	if role, ok := claims["role"].(string); ok && (role == "admin" || role == "user") {
-		return handler(ctx, req)
-	}
-
-	return nil, fmt.Errorf("unauthorized")
+type trainServer struct {
+	pb.UnimplementedTrainServiceServer
+	receipts map[string]*pb.Receipt
+	seats    map[string]string // Maps email to seat
+	sectionA []string          // Seats in Section A
+	sectionB []string          // Seats in Section B
+	mu       sync.Mutex
 }
 
-type server struct {
-	proto.UnimplementedTrainTicketServiceServer
+func newServer() *trainServer {
+	return &trainServer{
+		receipts: make(map[string]*pb.Receipt),
+		seats:    make(map[string]string),
+		sectionA: seats_SectionA,
+		sectionB: seats_SectionB,
+	}
 }
 
-func (s *server) PurchaseTicket(ctx context.Context, req *proto.PurchaseRequest) (*proto.PurchaseReply, error) {
-	userEmail, _, err := extractAndValidateTokenFromMetadata(ctx)
-	if err != nil {
-		return nil, err
+// Implement the PurchaseTicket RPC
+func (s *trainServer) PurchaseTicket(ctx context.Context, req *pb.PurchaseRequest) (*pb.Receipt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if user already has a ticket
+	if _, exists := s.receipts[req.User.Email]; exists {
+		return nil, fmt.Errorf("user already has a ticket")
 	}
 
-	// Ensure the train isn't overbooked
-	mu.Lock()
-	if seatCounter >= 20 {
-		mu.Unlock()
-		return nil, fmt.Errorf("all seats on the train are booked")
+	// Assign seat (simple round-robin allocation for demonstration)
+	var seat string
+	if len(s.sectionA) > 0 {
+		seat, s.sectionA = s.sectionA[0], s.sectionA[1:]
+	} else if len(s.sectionB) > 0 {
+		seat, s.sectionB = s.sectionB[0], s.sectionB[1:]
+	} else {
+		return nil, fmt.Errorf("no seats available")
 	}
-	seatCounter++
-	seat := seatCounter
-	mu.Unlock()
 
-	// Assign seats to section A or B
-	section := "A"
-	seatNumber := seat
-	if seat > 10 {
-		section = "B"
-		seatNumber = seat - 10
+	ticket_price := 5.00
+
+	discountAmount := 0.0
+	if !(strings.ToLower(req.Discount) == "discount1" || strings.ToLower(req.Discount) == "discount2" || len(req.Discount) == 0) {
+		return nil, fmt.Errorf("wrong discount type")
+	} else {
+
+		if strings.ToLower(req.Discount) == "discount1" {
+			discountAmount = 1.0
+		} else if strings.ToLower(req.Discount) == "discount2" {
+			discountAmount = 10.0
+		}
+		if ticket_price <= discountAmount {
+			return nil, fmt.Errorf("discount amount can't be higher than original price")
+		}
 	}
-	ticketID := fmt.Sprintf("%s-%d", section, seatNumber)
 
-	// Use userEmail as the key
-	tickets.Store(userEmail, ticketID)
+	receipt := &pb.Receipt{
+		User:     req.User,
+		From:     req.From,
+		To:       req.To,
+		Price:    ticket_price - discountAmount,
+		Seat:     seat,
+		Discount: req.Discount,
+	}
 
-	return &proto.PurchaseReply{ReceiptId: ticketID}, nil
+	s.receipts[req.User.Email] = receipt
+	s.seats[req.User.Email] = seat
+
+	return receipt, nil
 }
 
-func (s *server) ViewReceipt(ctx context.Context, req *proto.AuthRequest) (*proto.ReceiptReply, error) {
-	userEmail, _, err := extractAndValidateTokenFromMetadata(ctx)
-	if err != nil {
-		return nil, err
-	}
+// Implement the GetReceipt RPC
+func (s *trainServer) GetReceipt(ctx context.Context, req *pb.UserRequest) (*pb.Receipt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Retrieve the ticket information associated with the user's email
-	if ticketInfo, ok := tickets.Load(userEmail); ok {
-		return &proto.ReceiptReply{Details: fmt.Sprintf("Ticket Info: %s", ticketInfo)}, nil
-	}
-
-	return nil, fmt.Errorf("no ticket found for user with email: %s", userEmail)
-}
-
-func (s *server) RemoveUserFromTrain(ctx context.Context, req *proto.ModifyUserRequest) (*proto.ModifyUserReply, error) {
-	userEmail, role, err := extractAndValidateTokenFromMetadata(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if role == "user" && userEmail != req.UserEmail {
-		return &proto.ModifyUserReply{Success: false}, fmt.Errorf("you're not allowed to remove the user with the email: %s", req.UserEmail)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	_, exists := tickets.Load(req.UserEmail)
+	receipt, exists := s.receipts[req.Email]
 	if !exists {
-		return &proto.ModifyUserReply{Success: false}, fmt.Errorf("no ticket found for email: %s", req.UserEmail)
+		return nil, fmt.Errorf("no receipt found for user")
 	}
 
-	tickets.Delete(req.UserEmail)
-
-	return &proto.ModifyUserReply{Success: true}, nil
+	return receipt, nil
 }
 
-func (s *server) ModifyUserSeat(ctx context.Context, req *proto.ModifyUserRequest) (*proto.ModifyUserReply, error) {
-	_, err := authenticate(ctx) // Authenticates the user or admin
-	if err != nil {
-		return nil, err
+// Implement the ViewSeats RPC
+func (s *trainServer) ViewSeats(ctx context.Context, req *pb.SectionRequest) (*pb.SeatResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if req.Section != "A" && req.Section != "B" {
+		return nil, fmt.Errorf("no section for %v", req.Section)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	var users []*pb.User
+	for email, seat := range s.seats {
+		if (req.Section == "A" && seat[0] == 'A') || (req.Section == "B" && seat[0] == 'B') {
+			receipt := s.receipts[email]
+			users = append(users, receipt.User)
+		}
+	}
 
-	newSeatID := fmt.Sprintf("section-%s-seat-%d", req.NewSection, req.NewSeat)
-	_, exists := tickets.Load(req.UserEmail)
+	return &pb.SeatResponse{Users: users}, nil
+}
+
+// Implement the RemoveUser RPC
+func (s *trainServer) RemoveUser(ctx context.Context, req *pb.UserRequest) (*pb.GenericResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	receipt, exists := s.receipts[req.Email]
 	if !exists {
-		return &proto.ModifyUserReply{Success: false}, fmt.Errorf("no ticket found for email: %s", req.UserEmail)
+		return nil, fmt.Errorf("user not found")
 	}
 
-	tickets.Store(req.UserEmail, newSeatID)
+	// Return the seat to the pool
+	seat := receipt.Seat
+	if seat[0] == 'A' {
+		s.sectionA = append(s.sectionA, seat)
+	} else {
+		s.sectionB = append(s.sectionB, seat)
+	}
 
-	return &proto.ModifyUserReply{Success: true}, nil
+	delete(s.receipts, req.Email)
+	delete(s.seats, req.Email)
+
+	return &pb.GenericResponse{Message: "User removed successfully"}, nil
 }
 
-func (s *server) ViewAllUsers(ctx context.Context, req *proto.AuthRequest) (*proto.UserListReply, error) {
-	_, role, err := extractAndValidateTokenFromMetadata(ctx) // Authenticates and checks if admin
-	if err != nil {
-		return nil, err
+// Implement the ModifySeat RPC
+func (s *trainServer) ModifySeat(ctx context.Context, req *pb.ModifySeatRequest) (*pb.GenericResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	receipt, exists := s.receipts[req.Email]
+	if !exists {
+		return nil, fmt.Errorf("user not found")
 	}
 
-	if role == "user" {
-		return &proto.UserListReply{Details: "Only Admins can see list of users"}, nil
+	// Check if the new seat is not taken by others
+	newSeat := req.NewSeat
+	for _, seat := range s.seats {
+		if seat == newSeat {
+			return nil, fmt.Errorf("seat %s is already taken", newSeat)
+		}
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	// Check if the new seat is exists in seat array
+	isExist := false
+	if req.NewSeat[0] == 'A' {
+		for _, seat := range seats_SectionA {
+			if seat == newSeat {
+				isExist = true
+			}
+		}
+	} else if req.NewSeat[0] == 'B' {
+		for _, seat := range seats_SectionB {
+			if seat == newSeat {
+				isExist = true
+			}
+		}
+	}
 
-	var details string
-	tickets.Range(func(key, value interface{}) bool {
-		details += fmt.Sprintf("User: %v, Seat: %v\n", key, value)
-		return true
-	})
+	if !isExist {
+		return nil, fmt.Errorf("seat %v is not existing.", newSeat)
+	}
 
-	return &proto.UserListReply{Details: details}, nil
+	// Update the seat
+	oldSeat := receipt.Seat
+	receipt.Seat = newSeat
+	s.seats[req.Email] = newSeat
+
+	// Return the old seat to the pool
+	if oldSeat[0] == 'A' {
+		s.sectionA = append(s.sectionA, oldSeat)
+	} else {
+		s.sectionB = append(s.sectionB, oldSeat)
+	}
+
+	return &pb.GenericResponse{Message: "Seat modified successfully"}, nil
 }
 
 func main() {
@@ -153,10 +201,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(authInterceptor),
-	)
-	proto.RegisterTrainTicketServiceServer(grpcServer, &server{})
+	grpcServer := grpc.NewServer()
+	pb.RegisterTrainServiceServer(grpcServer, newServer())
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}

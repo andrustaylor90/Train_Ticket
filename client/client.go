@@ -2,102 +2,115 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"train_ticket_service/proto"
+	"time"
+	pb "train-ticket-app/pb/proto/proto"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
+const address = "localhost:50051"
+
+type OutRecipt struct {
+	FirstName string
+	LastName  string
+	Email     string
+	From      string
+	To        string
+	Price     float64
+	Seat      string
+}
+
 func main() {
-	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure(), grpc.WithBlock())
+	// Set up a connection to the server.
+	conn, err := grpc.Dial(address, grpc.WithInsecure(), grpc.WithBlock())
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
 	defer conn.Close()
-	client := proto.NewTrainTicketServiceClient(conn)
+	client := pb.NewTrainServiceClient(conn)
 
-	// user token
-	token := "Bearer token"
+	// Set up a context with a timeout
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	// email used for JWT claims
-	userEmail := "user@example.com"
+	// Example user
+	user := &pb.User{FirstName: "Andrus", LastName: "Taylor", Email: "andrustaylor90@gmail.com"}
 
-	// Call the methods
-	purchaseTicket(client, token)
-	viewReceipt(client, token, userEmail)
-	viewAllUsers(client, token)
-	removeUserFromTrain(client, token, userEmail)
-	modifyUserSeat(client, token, userEmail, "A", 1)
-}
-
-func purchaseTicket(client proto.TrainTicketServiceClient, token string) {
-	md := metadata.New(map[string]string{"authorization": token})
-	ctx := metadata.NewOutgoingContext(context.Background(), md)
-	req := &proto.PurchaseRequest{
-		From: "London",
-		To:   "Paris",
-		User: &proto.User{
-			FirstName: "John",
-			LastName:  "Doe",
-			Email:     "john.doe@example.com",
-		},
-	}
-	res, err := client.PurchaseTicket(ctx, req)
+	// 1. Purchase Ticket
+	receipt, err := client.PurchaseTicket(ctx, &pb.PurchaseRequest{User: user, From: "London", To: "France", Discount: "discount1"})
 	if err != nil {
-		log.Fatalf("Error when calling PurchaseTicket: %v", err)
+		log.Fatalf("could not purchase ticket: %v", err)
 	}
-	log.Printf("PurchaseTicket Response: %s", res.ReceiptId)
-}
 
-func viewReceipt(client proto.TrainTicketServiceClient, token, email string) {
-	md := metadata.New(map[string]string{"authorization": token})
-	ctx := metadata.NewOutgoingContext(context.Background(), md)
-	req := &proto.AuthRequest{Token: email}
-	res, err := client.ViewReceipt(ctx, req)
-	if err != nil {
-		log.Fatalf("Error when calling ViewReceipt: %v", err)
-	}
-	log.Printf("ViewReceipt Response: %s", res.Details)
-}
+	fmt.Printf("Purchased Ticket: %+v\n", OutRecipt{
+		FirstName: receipt.User.FirstName,
+		LastName:  receipt.User.LastName,
+		Email:     receipt.User.Email,
+		From:      receipt.From,
+		To:        receipt.To,
+		Seat:      receipt.Seat,
+		Price:     receipt.Price,
+	})
 
-func viewAllUsers(client proto.TrainTicketServiceClient, token string) {
-	md := metadata.New(map[string]string{"authorization": token})
-	ctx := metadata.NewOutgoingContext(context.Background(), md)
-	req := &proto.AuthRequest{Token: token}
-	res, err := client.ViewAllUsers(ctx, req)
+	// 2. Get Receipt
+	gotReceipt, err := client.GetReceipt(ctx, &pb.UserRequest{Email: "andrustaylor90@gmail.com"})
 	if err != nil {
-		log.Fatalf("Error when calling ViewAllUsers: %v", err)
+		log.Fatalf("could not get receipt: %v", err)
 	}
-	log.Printf("ViewAllUsers Response: %s", res.Details)
-}
+	fmt.Printf("Got Receipt: %+v\n", OutRecipt{
+		FirstName: gotReceipt.User.FirstName,
+		LastName:  gotReceipt.User.LastName,
+		Email:     gotReceipt.User.Email,
+		From:      gotReceipt.From,
+		To:        gotReceipt.To,
+		Seat:      gotReceipt.Seat,
+		Price:     gotReceipt.Price,
+	})
 
-func removeUserFromTrain(client proto.TrainTicketServiceClient, token, email string) {
-	md := metadata.New(map[string]string{"authorization": token})
-	ctx := metadata.NewOutgoingContext(context.Background(), md)
-	req := &proto.ModifyUserRequest{
-		Token:     token,
-		UserEmail: email,
-	}
-	res, err := client.RemoveUserFromTrain(ctx, req)
+	// 3. View Seats
+	seatsA, err := client.ViewSeats(ctx, &pb.SectionRequest{Section: "A"})
 	if err != nil {
-		log.Fatalf("Error when calling RemoveUserFromTrain: %v", err)
+		log.Fatalf("could not view seats: %v", err)
 	}
-	log.Printf("RemoveUserFromTrain Response: %v", res.Success)
-}
+	fmt.Printf("Seats in Section A: %+v\n", seatsA)
 
-func modifyUserSeat(client proto.TrainTicketServiceClient, token, email, section string, seatNumber int32) {
-	md := metadata.New(map[string]string{"authorization": token})
-	ctx := metadata.NewOutgoingContext(context.Background(), md)
-	req := &proto.ModifyUserRequest{
-		Token:      token,
-		UserEmail:  email,
-		NewSection: section,
-		NewSeat:    seatNumber,
-	}
-	res, err := client.ModifyUserSeat(ctx, req)
+	// 4. Modify Seat (this will fail as the user is already removed, but included for completeness)
+	modifyResponse, err := client.ModifySeat(ctx, &pb.ModifySeatRequest{Email: "andrustaylor90@gmail.com", NewSeat: "B1"})
 	if err != nil {
-		log.Fatalf("Error when calling ModifyUserSeat: %v", err)
+		fmt.Printf("could not modify seat (as expected since user is removed): %v\n", err)
+	} else {
+		fmt.Printf("Modify Seat Response: %+v\n", modifyResponse)
 	}
-	log.Printf("ModifyUserSeat Response: %v", res.Success)
+
+	// 5. Get Receipt
+	gotReceiptAfterUpdating, err := client.GetReceipt(ctx, &pb.UserRequest{Email: "andrustaylor90@gmail.com"})
+	if err != nil {
+		log.Fatalf("could not get receipt: %v", err)
+	}
+	fmt.Printf("Got Receipt: %+v\n", OutRecipt{
+		FirstName: gotReceiptAfterUpdating.User.FirstName,
+		LastName:  gotReceiptAfterUpdating.User.LastName,
+		Email:     gotReceiptAfterUpdating.User.Email,
+		From:      gotReceiptAfterUpdating.From,
+		To:        gotReceiptAfterUpdating.To,
+		Seat:      gotReceiptAfterUpdating.Seat,
+		Price:     gotReceiptAfterUpdating.Price,
+	})
+
+	// 6. Remove User
+	removeResponse, err := client.RemoveUser(ctx, &pb.UserRequest{Email: "andrustaylor90@gmail.com"})
+	if err != nil {
+		log.Fatalf("could not remove user: %v", err)
+	}
+	fmt.Printf("Remove User Response: %+v\n", removeResponse)
+
+	// 7. Try to Modify Seat (this will fail as the user is already removed, but included for completeness)
+	modifyResponseAgain, err := client.ModifySeat(ctx, &pb.ModifySeatRequest{Email: "andrustaylor90@gmail.com", NewSeat: "B1"})
+	if err != nil {
+		fmt.Printf("could not modify seat (as expected since user is removed): %v\n", err)
+	} else {
+		fmt.Printf("Modify Seat Response: %+v\n", modifyResponseAgain)
+	}
 }
